@@ -17,6 +17,12 @@ const (
 
 var IgnoreUnsupportedFileTypes = false
 
+type FileCopyHandler func(src, dest string, info os.FileInfo) error
+
+var FileTypeCopyHandlers = map[os.FileMode]FileCopyHandler {
+	os.ModeSymlink: lcopy,
+}
+
 // Copy copies src to dest, doesn't matter if src is a directory or a file
 func Copy(src, dest string) error {
 	info, err := os.Lstat(src)
@@ -46,10 +52,14 @@ func copy(src, dest string, info os.FileInfo) error {
 
 	if info.Mode().IsRegular() {
 		return fcopy(src, dest, info)
-	} else if info.Mode()&os.ModeSymlink != 0 {
-		return lcopy(src, dest, info)
 	} else if info.IsDir() {
 		return dcopy(src, dest, info)
+	} else {
+		for fileType, handler := range FileTypeCopyHandlers {
+			if info.Mode()&fileType != 0 {
+				return handler(src, dest, info)
+			}
+		}
 	}
 
 	return &UnsupportedFileTypeError{
