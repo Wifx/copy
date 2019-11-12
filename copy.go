@@ -6,6 +6,8 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"syscall"
+	"time"
 )
 
 const (
@@ -15,11 +17,20 @@ const (
 	tmpPermissionForDirectory = os.FileMode(0755)
 )
 
-var IgnoreUnsupportedFileTypes = false
+var (
+	// If set to true, unsupported file types will not be copied, and no error will be generated
+	IgnoreUnsupportedFileTypes = false
+	// If set to true, the permission of the source files and folder will be preserved in the destination
+	PreservePermissions = false
+	// If set to true, the owner of the source files and folder will be preserved in the destination
+	PreserveOwner = false
+	// If set to true, the access and modifications times of the source files and folder will be preserved in the destination
+	PreserveTime = false
+)
 
 type FileCopyHandler func(src, dest string, info os.FileInfo) error
 
-var FileTypeCopyHandlers = map[os.FileMode]FileCopyHandler {
+var FileTypeCopyHandlers = map[os.FileMode]FileCopyHandler{
 	os.ModeSymlink: lcopy,
 }
 
@@ -50,21 +61,83 @@ func Copy(src, dest string) error {
 // "info" MUST be given here, NOT nil.
 func copy(src, dest string, info os.FileInfo) error {
 
+	var err error
 	if info.Mode().IsRegular() {
-		return fcopy(src, dest, info)
+		err = fcopy(src, dest, info)
 	} else if info.IsDir() {
-		return dcopy(src, dest, info)
+		err = dcopy(src, dest, info)
 	} else {
 		for fileType, handler := range FileTypeCopyHandlers {
 			if info.Mode()&fileType != 0 {
-				return handler(src, dest, info)
+				err = handler(src, dest, info)
+				break
 			}
+		}
+
+		err = &UnsupportedFileTypeError{
+			mode: info.Mode(),
+			path: src,
 		}
 	}
 
-	return &UnsupportedFileTypeError{
-		mode: info.Mode(),
-		path: src,
+	if err != nil {
+		return err
+	}
+
+	var errs []error
+	if PreservePermissions {
+		err = os.Chmod(dest, info.Mode().Perm())
+		if err != nil {
+			err = fmt.Errorf("could not restore permissions '%s' for file %s: %w", info.Mode().Perm().String(), dest, err)
+			errs = append(errs, err)
+		}
+	}
+
+	var stat *syscall.Stat_t
+	if PreserveOwner || PreserveTime {
+		stat, _ = info.Sys().(*syscall.Stat_t)
+	}
+
+	if PreserveOwner {
+		if stat != nil {
+			err = os.Lchown(dest, int(stat.Uid), int(stat.Gid))
+			if err != nil {
+				err = fmt.Errorf("could not restore owner %d:%d for file %s: %w", stat.Uid, stat.Gid, dest, err)
+			}
+		} else {
+			err = fmt.Errorf("could not restore owner for file %s: %w", dest, err)
+		}
+
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if PreserveTime {
+		if stat != nil {
+			atime := time.Unix(int64(stat.Atim.Sec), int64(stat.Atim.Nsec))
+			mtime := info.ModTime()
+			err = os.Chtimes(dest, atime, mtime)
+			if err != nil {
+				err = fmt.Errorf("could not restore timestamp '%s' for file %s: %w", info.ModTime().String(), dest, err)
+			}
+
+		} else {
+			err = fmt.Errorf("could not restore timestamp for file %s: %w", dest, err)
+		}
+
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if len(errs) > 0 {
+		return &FileCopyTasksError{
+			path:   dest,
+			errors: errs,
+		}
+	} else {
+		return nil
 	}
 }
 
@@ -153,4 +226,13 @@ type UnsupportedFileTypeError struct {
 
 func (e *UnsupportedFileTypeError) Error() string {
 	return fmt.Sprintf("unsupported mode '%s' for file %s", e.mode.String(), e.path)
+}
+
+type FileCopyTasksError struct {
+	path   string
+	errors []error
+}
+
+func (e *FileCopyTasksError) Error() string {
+	return fmt.Sprintf("some tasks after the copy of file %s could not be achieved", e.path)
 }
