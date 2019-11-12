@@ -1,6 +1,7 @@
 package copy
 
 import (
+	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
@@ -14,26 +15,47 @@ const (
 	tmpPermissionForDirectory = os.FileMode(0755)
 )
 
+var IgnoreUnsupportedFileTypes = false
+
 // Copy copies src to dest, doesn't matter if src is a directory or a file
 func Copy(src, dest string) error {
 	info, err := os.Lstat(src)
 	if err != nil {
 		return err
 	}
-	return copy(src, dest, info)
+
+	err = copy(src, dest, info)
+	if err != nil {
+		// If we encountered an unsupported file type, exit only if we don't ignore them
+		if _, ok := err.(*UnsupportedFileTypeError); ok {
+			if !IgnoreUnsupportedFileTypes {
+				return err
+			}
+		} else {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // copy dispatches copy-funcs according to the mode.
 // Because this "copy" could be called recursively,
 // "info" MUST be given here, NOT nil.
 func copy(src, dest string, info os.FileInfo) error {
-	if info.Mode()&os.ModeSymlink != 0 {
+
+	if info.Mode().IsRegular() {
+		return fcopy(src, dest, info)
+	} else if info.Mode()&os.ModeSymlink != 0 {
 		return lcopy(src, dest, info)
-	}
-	if info.IsDir() {
+	} else if info.IsDir() {
 		return dcopy(src, dest, info)
 	}
-	return fcopy(src, dest, info)
+
+	return &UnsupportedFileTypeError{
+		mode: info.Mode(),
+		path: src,
+	}
 }
 
 // fcopy is for just a file,
@@ -87,8 +109,16 @@ func dcopy(srcdir, destdir string, info os.FileInfo) error {
 	for _, content := range contents {
 		cs, cd := filepath.Join(srcdir, content.Name()), filepath.Join(destdir, content.Name())
 		if err := copy(cs, cd, content); err != nil {
-			// If any error, exit immediately
-			return err
+
+			// If we encountered an unsupported file type, exit only if we don't ignore them
+			if _, ok := err.(*UnsupportedFileTypeError); ok {
+				if !IgnoreUnsupportedFileTypes {
+					return err
+				}
+			} else {
+				// If any error, exit immediately
+				return err
+			}
 		}
 	}
 
@@ -103,4 +133,14 @@ func lcopy(src, dest string, info os.FileInfo) error {
 		return err
 	}
 	return os.Symlink(src, dest)
+}
+
+type UnsupportedFileTypeError struct {
+	msg  string
+	mode os.FileMode
+	path string
+}
+
+func (e *UnsupportedFileTypeError) Error() string {
+	return fmt.Sprintf("unsupported mode '%s' for file %s", e.mode.String(), e.path)
 }
