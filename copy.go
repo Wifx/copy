@@ -86,10 +86,13 @@ func copy(src, dest string, info os.FileInfo) error {
 
 	var errs []error
 	if PreservePermissions {
-		err = os.Chmod(dest, info.Mode().Perm())
-		if err != nil {
-			err = fmt.Errorf("could not restore permissions '%s' for file %s: %w", info.Mode().Perm().String(), dest, err)
-			errs = append(errs, err)
+		// Symbolic links do not have modes, they reflect the permission of the target
+		if info.Mode()&os.ModeSymlink == 0 {
+			err = os.Chmod(dest, info.Mode().Perm())
+			if err != nil {
+				err = fmt.Errorf("could not restore permissions '%s' for file %s: %w", info.Mode().Perm().String(), dest, err)
+				errs = append(errs, err)
+			}
 		}
 	}
 
@@ -114,20 +117,25 @@ func copy(src, dest string, info os.FileInfo) error {
 	}
 
 	if PreserveTime {
-		if stat != nil {
-			atime := time.Unix(int64(stat.Atim.Sec), int64(stat.Atim.Nsec))
-			mtime := info.ModTime()
-			err = os.Chtimes(dest, atime, mtime)
-			if err != nil {
-				err = fmt.Errorf("could not restore timestamp '%s' for file %s: %w", info.ModTime().String(), dest, err)
+
+		// For now, we cannot change a symlink times, we need os.LChtimes. Simply ignore.
+		if info.Mode()&os.ModeSymlink == 0 {
+
+			if stat != nil {
+				atime := time.Unix(int64(stat.Atim.Sec), int64(stat.Atim.Nsec))
+				mtime := info.ModTime()
+				err = os.Chtimes(dest, atime, mtime)
+				if err != nil {
+					err = fmt.Errorf("could not restore timestamp '%s' for file %s: %w", info.ModTime().String(), dest, err)
+				}
+
+			} else {
+				err = fmt.Errorf("could not restore timestamp for file %s: %w", dest, err)
 			}
 
-		} else {
-			err = fmt.Errorf("could not restore timestamp for file %s: %w", dest, err)
-		}
-
-		if err != nil {
-			errs = append(errs, err)
+			if err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 
